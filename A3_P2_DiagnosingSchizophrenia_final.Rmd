@@ -1,0 +1,607 @@
+---
+title: "Assignment 3 - Part 2 - Diagnosing Schizophrenia from Voice"
+author: "Riccardo Fusaroli"
+date: "October 17, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment 3 - Diagnosing schizophrenia from voice
+
+In the previous part of the assignment you generated a bunch of "features", that is, of quantitative descriptors of voice in schizophrenia, focusing on pitch.
+In the course of this assignment we will use them to try to automatically diagnose schizophrenia from voice only, that is, relying on the set of features you produced last time, we will try to produce an automated classifier.
+```{r}
+# Load libraries
+library(lmtest)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(car)
+library(plyr)
+library(stringr)
+library(tidyverse)
+library(Metrics)
+library(modelr)
+library(caret)
+library(cvTools)
+library(simr)
+library(MASS)
+library(pastecs)
+library(crqa)
+library(nonlinearTseries)
+library(pROC)
+library(Scale)
+```
+
+
+```{r}
+d = read.csv("final_rqa.csv")
+```
+
+
+### Question 1: Can you diagnose schizophrenia from pitch range only? If so, how well?
+
+Build a logistic regression to see whether you can diagnose schizophrenia from pitch range only.
+```{r}
+# Logistic regression
+m1 = glmer(diagnosis ~ scale(range) + (1|study), d, family = "binomial")  # random effects - study, not participant nor trial
+summary(m1)
+
+# Estimates are in log odds, so transform it into probabilities
+inv.logit(-0.05961) 
+```
+Pitch range is not a sufficient predictor of schizophrenia (β=0.49, SE=0.06, p=0.34).
+
+
+Calculate the different performance measures (accuracy, sensitivity, specificity, PPV, NPV, ROC curve) on a logistic regression using the full dataset. Don't forget the random effects!
+```{r}
+# Get the logits/log odds
+d$predictionsLogits = predict(m1)
+
+# Make a function that converts it to prob 
+logit2prob = function(logit){
+  odds = exp(logit)
+  prob = odds / (1+odds)
+  return(prob)
+}
+
+# Confusion Matrix
+# Calculate probabilities
+  # The threshold is a function of the cost function
+    # If false positives and false negatives have equal costs: >.5 is [diagnosis]
+    # If false positives are more costly than false negatives, we need to be more sure of the diagnosis, so: e.g. >.7 
+    # If false negatives are more costly than false positives, we need to take seriously also small possibilities: e.g. >.3
+
+d$PredictionsPerc = lapply(d$predictionsLogits, logit2prob)
+# If the percentage is above 0.5 we predict schizophrenia
+d$predictions[d$PredictionsPerc > 0.5] = "schizophrenia"
+# If the percentage is under 0.5 we predict control
+d$predictions[d$PredictionsPerc < 0.5] = "control"
+# Confusion matrix
+confusionMatrix(data = d$predictions, reference = d$diagnosis, positive = "schizophrenia")
+
+d$PredictionsPerc = as.numeric(d$PredictionsPerc)
+
+# ROC curve
+rocCurve <- roc(response = d$diagnosis, predictor = d$PredictionsPerc)
+auc(rocCurve) 
+ci(rocCurve)
+plot(rocCurve, legacy.axes = TRUE) 
+
+```
+
+Then cross-validate the logistic regression and re-calculate performance on the testing folds. N.B. The cross-validation functions you already have should be tweaked: you need to calculate these new performance measures.
+
+N.B. the predict() function generates log odds (the full scale between minus and plus infinity). Log odds > 0 indicates a choice of 1, below a choice of 0.
+N.B. you need to decide whether calculate performance on each single test fold or save all the prediction for test folds in one datase, so to calculate overall performance.
+N.B. Now you have two levels of structure: subject and study. Should this impact your cross-validation?
+
+
+```{r}
+# Read data again (don't need added predictions)
+dcv = read.csv("final_rqa.csv")
+dcv$participant = as.numeric(dcv$participant)
+```
+
+```{r}
+# In order for us to make our create folds work, we will make a new row called SUBJ where the ID is in numbers from 1-x
+dcv$SUBJ = as.numeric(factor(dcv$participant))
+dcv$diagnosis = as.factor(dcv$diagnosis)
+
+k=10
+
+# Create folds
+folds = createFolds(unique(dcv$SUBJ), k=k, list = T, returnTrain = F)
+
+# Make variables and count to save the results
+  # We want to save:
+    #(accuracy, sensitivity, specificity, PPV, NPV, ROC curve)
+  # rm= RangeModel
+trainAccuracy = NULL
+trainSensitivity = NULL
+trainSpecificity = NULL
+trainPPV = NULL
+trainNPV = NULL
+trainAUC = NULL
+
+testAccuracy = NULL
+testSensitivity = NULL
+testSpecificity = NULL
+testPPV = NULL
+testNPV = NULL
+testAUC = NULL
+
+N = 1
+
+# Loop
+for(i in folds){
+  test = subset(dcv,SUBJ %in% i) 
+  train = subset(dcv,!(SUBJ %in% i)) 
+  
+  # Model
+  train_model = glmer(diagnosis ~ scale(range) + (1|study), data = train, family = "binomial") 
+  
+  #-----------------------------------
+  ## Testing the training data
+
+  # Predict
+  train$logit = predict(train_model, train)
+  
+  # Calculate probabilities
+  train$PredictionsPerc = lapply(train$logit, logit2prob)
+  # If the percentage is above 0.5 we predict schizophrenia
+  train$predictions[train$PredictionsPerc > 0.5] = "schizophrenia"
+  # If the percentage is under 0.5 we predict control
+  train$predictions[train$PredictionsPerc < 0.5] = "control"
+  # Confusion matrix
+  confMat = confusionMatrix(data = train$predictions, reference = train$diagnosis, positive = "schizophrenia")
+
+  trainAccuracy[N] = confMat$overall[1]
+  trainSensitivity[N] = confMat$byClass[1]
+  trainSpecificity[N] = confMat$byClass[2]
+  trainPPV[N] = confMat$byClass[3]
+  trainNPV[N] = confMat$byClass[4]
+  
+  
+  train$PredictionsPerc = as.numeric(train$PredictionsPerc)
+
+  # Calculate area under the curve
+  rocANS = roc(response = train$diagnosis, predictor = train$PredictionsPerc)
+  
+  trainAUC[N] = rocANS$auc
+
+  #------------------------------------
+  ## Testing the test data
+  # Predict
+  test$logit = predict(train_model, test)
+  
+  # calculate probabilities
+  test$PredictionsPerc = lapply(test$logit, logit2prob)
+  # If the percentage is above 0.5 we predict schizophrenia
+  test$predictions[test$PredictionsPerc > 0.5] = "schizophrenia"
+  # If the percentage is under 0.5 we predict control
+  test$predictions[test$PredictionsPerc < 0.5] = "control"
+  # Confusion matrix
+  confMatTest = confusionMatrix(data = test$predictions, reference = test$diagnosis, positive = "schizophrenia")
+
+  testAccuracy[N] = confMatTest$overall[1]
+  testSensitivity[N] = confMatTest$byClass[1]
+  testSpecificity[N] = confMatTest$byClass[2]
+  testPPV[N] = confMatTest$byClass[3]
+  testNPV[N] = confMatTest$byClass[4]
+  
+  
+  test$PredictionsPerc = as.numeric(test$PredictionsPerc)
+ 
+  # Calculate area under the curve
+  rocANStest = roc(response = test$diagnosis, predictor = test$PredictionsPerc)
+  
+  testAUC[N] = rocANStest$auc
+  
+  
+  
+  N = N+1
+  
+ 
+}
+
+# Make dataframe with results
+crossValTrainResults = data.frame(trainAccuracy, trainSensitivity, trainSpecificity, trainPPV, trainNPV, trainAUC)
+crossValTestResults = data.frame(testAccuracy, testSensitivity, testSpecificity, testPPV, testNPV, testAUC)
+
+
+# Take the means for overall performance
+trainResults = unlist(lapply(crossValTrainResults, mean))
+testResults = unlist(lapply(crossValTestResults, mean))
+
+# Merge df
+performanceRange = data.frame(trainResults, testResults)
+
+
+# Rename col names
+row.names(performanceRange) = c("accuracy", "sensitivity", "specificity", "PPV", "NPV", "AUC")
+colnames(performanceRange) = c("trainPerformance", "testPerformance")
+    
+
+```
+
+
+
+### Question 2 - Which single acoustic predictor is the best predictor of diagnosis?
+```{r}
+# Get colnames and make a list of relevant colNames that we need to go through
+accousticFeatures = colnames(dcv)[-c(1:7, 23)]
+
+# No. of folds
+k = 10
+# Create folds
+folds = createFolds(unique(dcv$SUBJ), k = k, list = T, returnTrain = F)
+n = 1
+
+# First part of the loop
+for (feature in accousticFeatures){
+  print(feature)
+  # Create the variables and make them empty
+  trainAccuracy = NULL
+  trainSensitivity = NULL
+  trainSpecificity = NULL
+  trainPPV = NULL
+  trainNPV = NULL
+  trainAUC = NULL
+
+  testAccuracy = NULL
+  testSensitivity = NULL
+  testSpecificity = NULL
+  testPPV = NULL
+  testNPV = NULL
+  testAUC = NULL
+  
+  # Add N for counting
+  N = 1
+  
+    # Make the string for the string for the model
+      stringModel = paste("diagnosis ~ scale(", feature, ") + (1|study)", sep = "")
+  
+      
+  # Make sub-loop for CV
+    for (fold in folds){
+      test = subset(dcv, SUBJ %in% fold)
+      train = subset(dcv, !(SUBJ %in% fold))
+      
+      model = glmer(stringModel, train, family = binomial)
+      
+      #------------------------------------
+      ## Testing the training data
+    
+      # Predict
+      train$logit = predict(model, train)
+      
+      # Calculate probabilities
+      train$PredictionsPerc = lapply(train$logit, logit2prob)
+      # If the percentage is above 0.5 we predict schizophrenia
+      train$predictions[train$PredictionsPerc > 0.5] = "schizophrenia"
+      # If the percentage is under 0.5 we predict control
+      train$predictions[train$PredictionsPerc < 0.5] = "control"
+      # Confusion matrix
+      confMat = confusionMatrix(data = train$predictions, reference = train$diagnosis, positive = "schizophrenia")
+    
+      trainAccuracy[N] = confMat$overall[1]
+      trainSensitivity[N] = confMat$byClass[1]
+      trainSpecificity[N] = confMat$byClass[2]
+      trainPPV[N] = confMat$byClass[3]
+      trainNPV[N] = confMat$byClass[4]
+      
+      
+      train$PredictionsPerc = as.numeric(train$PredictionsPerc)
+    
+      # Calculate area under the curve
+      rocANS = roc(response = train$diagnosis, predictor = train$PredictionsPerc)
+      
+      trainAUC[N] = rocANS$auc
+    
+      #------------------------------------
+      ## Testing the test data
+      # Predict
+      test$logit = predict(model, test)
+      
+      # calculate probabilities
+      test$PredictionsPerc = lapply(test$logit, logit2prob)
+      # If the percentage is above 0.5 we predict schizophrenia
+      test$predictions[test$PredictionsPerc > 0.5] = "schizophrenia"
+      # If the percentage is under 0.5 we predict control
+      test$predictions[test$PredictionsPerc < 0.5] = "control"
+      # Confusion matrix
+      confMatTest = confusionMatrix(data = test$predictions, reference = test$diagnosis, positive = "schizophrenia")
+    
+      testAccuracy[N] = confMatTest$overall[1]
+      testSensitivity[N] = confMatTest$byClass[1]
+      testSpecificity[N] = confMatTest$byClass[2]
+      testPPV[N] = confMatTest$byClass[3]
+      testNPV[N] = confMatTest$byClass[4]
+      
+      
+      test$PredictionsPerc = as.numeric(test$PredictionsPerc)
+    
+      # Calculate area under the curve
+      rocANStest = roc(response = test$diagnosis, predictor = test$PredictionsPerc)
+      
+      testAUC[N] = rocANStest$auc
+      
+      
+      
+      N = N+1
+    }
+    
+    crossValTrainResults = data.frame(trainAccuracy, trainSensitivity, trainSpecificity, trainPPV, trainNPV, trainAUC)
+    crossValTestResults = data.frame(testAccuracy, testSensitivity, testSpecificity, testPPV, testNPV, testAUC)
+  
+  
+    # Take the means for overall performance
+    trainResults = unlist(lapply(crossValTrainResults, mean))
+    testResults = unlist(lapply(crossValTestResults, mean))
+ 
+    
+    if (n == 1){
+    dfResultsAll = data.frame(trainResults, testResults)
+    # Rename colnames
+    colnames = c(str_c("train_", feature), str_c("test_", feature))
+    
+    colnames(dfResultsAll) = colnames
+    n = n+1
+  }
+    else{
+    dfResultsAll = data.frame(dfResultsAll, trainResults, testResults)
+    
+    colnames = c(colnames, str_c("train_", feature), str_c("test_", feature))
+    
+    colnames(dfResultsAll) = colnames
+    
+  }
+print(testPPV)
+}
+
+
+row.names(dfResultsAll) = c("accuracy", "sensitivity", "specificity", "PPV", "NPV", "AUC")
+
+
+# look at AUC (ara under the curve) to see if predictor is good - 1=100%, 0.5=chance level
+
+# NOTE: all the results vary every time we run the loop
+```
+Best predictor is coefficient of variation with AUC 0.6460 for train data, and 0.6395 for test data.
+
+
+Test AUCs:
+range 0.59
+median 0.58
+InterquartileRange  0.62
+MeanAbsoluteDeviation 0.61
+coefficientOfVariation  0.64
+delay 0.55
+radius 0.59
+embed 0.57
+rqa_REC 0.62
+rqa_DET 0.60
+rqa_maxL 0.62
+rqa_L 0.57
+rqa_ENTR 0.59
+rqa_TT 0.59
+rqa_LAM 0.61
+
+
+
+### Question 3 - Which combination of acoustic predictors is best for diagnosing schizophrenia?
+```{r}
+# Not looking at predictors with test AUC=<0.55
+
+# Models
+stringMultiple = c("diagnosis ~ scale(coefficientOfVariation) + (1|study)",
+                   # m2
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + (1|study)",
+                   # m3
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + (1|study)",
+                   # m4
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + (1|study)",
+                   # m5
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + (1|study)",
+                   # m6
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + (1|study)",
+                   # m7
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + (1|study)",
+                   # m8
+                   "diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + scale(rqa_ENTR) + (1|study)",
+                   # m9
+                   #"diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + scale(rqa_ENTR) + scale(range) + (1|study)",
+                   # m10
+                   #"diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + scale(rqa_ENTR) + scale(range) + scale(embed) + (1|study)",
+                   # m11
+                   #"diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + scale(rqa_ENTR) + scale(range) + scale(embed) + scale(radius) + (1|study)",
+                   # m12
+                   #"diagnosis ~ scale(coefficientOfVariation) + scale(MeanAbsoluteDeviation) + scale(InterquartileRange) + scale(rqa_maxL) + scale(rqa_DET) + scale(rqa_TT) + scale(rqa_LAM) + scale(rqa_ENTR) + scale(range) + scale(embed) + scale(radius) + scale(rqa_L) + (1|study)",
+                  
+                   # interactions
+                   # m9
+                   "diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation) + (1|study)",
+                   # m10
+                   "diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation )*scale(InterquartileRange) + (1|study)",
+                   # m11
+                   "diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL) + (1|study)")
+                   # m16
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET) + (1|study)",
+                   # m17
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT) + (1|study)")
+                   # m18
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM) + (1|study)",
+                   # m19
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM)*scale(rqa_ENTR) + (1|study)",
+                   # m20
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM)*scale(rqa_ENTR)*scale(range) + (1|study)",
+                   # m21
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM)*scale(rqa_ENTR)*scale(range)*scale(embed) + (1|study)",
+                   # m22
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM)*scale(rqa_ENTR)*scale(range)*scale(embed)*scale(radius) + (1|study)",
+                   # m23
+                   #"diagnosis ~ scale(coefficientOfVariation)*scale(MeanAbsoluteDeviation)*scale(InterquartileRange)*scale(rqa_maxL)*scale(rqa_DET)*scale(rqa_TT)*scale(rqa_LAM)*scale(rqa_ENTR)*scale(range)*scale(embed)*scale(radius)*scale(rqa_L) + (1|study)")
+
+# String of model names 
+modelName = c("m1", "m2", "m3", "m4", "m5","m6","m7","m8","m9","m10","m11","m12","m13","m14","m15")
+```
+
+Now it's time to go wild! Use all (voice-related) variables and interactions you can think of. Compare models and select the best performing model you can find.
+
+Remember:
+- Out-of-sample error crucial to build the best model!
+- After choosing the model, send Celine and Riccardo the code of your model
+
+```{r}
+# Loop
+
+k =10
+# Create folds
+folds = createFolds(unique(dcv$SUBJ), k = k, list = T, returnTrain = F)
+n = 1
+
+# First part of the loop
+for (indModel in stringMultiple){
+  print(indModel)
+  
+  # Create the variables and make them empty
+  trainAccuracy = NULL
+  trainSensitivity = NULL
+  trainSpecificity = NULL
+  trainPPV = NULL
+  trainNPV = NULL
+  trainAUC = NULL
+
+  testAccuracy = NULL
+  testSensitivity = NULL
+  testSpecificity = NULL
+  testPPV = NULL
+  testNPV = NULL
+  testAUC = NULL
+  
+  # Add N for counting
+  N = 1
+  
+  # Make sub-loop for CV
+    for (fold in folds){
+      test = subset(dcv, SUBJ %in% fold)
+      train = subset(dcv, !(SUBJ %in% fold))
+      
+      model = glmer(indModel, train, family = binomial)
+      
+      #------------------------------------
+      ## Testing the training data
+    
+      # Predict
+      train$logit = predict(model, train)
+      
+      # Calculate probabilities
+      train$PredictionsPerc = lapply(train$logit, logit2prob)
+      # If the percentage is above 0.5 we predict schizophrenia
+      train$predictions[train$PredictionsPerc > 0.5] = "schizophrenia"
+      # If the percentage is under 0.5 we predict control
+      train$predictions[train$PredictionsPerc < 0.5] = "control"
+      # Confusion matrix
+      confMat = confusionMatrix(data = train$predictions, reference = train$diagnosis, positive = "schizophrenia")
+    
+      trainAccuracy[N] = confMat$overall[1]
+      trainSensitivity[N] = confMat$byClass[1]
+      trainSpecificity[N] = confMat$byClass[2]
+      trainPPV[N] = confMat$byClass[3]
+      trainNPV[N] = confMat$byClass[4]
+      
+      
+      train$PredictionsPerc = as.numeric(train$PredictionsPerc)
+    
+      # Calculate area under the curve
+      rocANS = roc(response = train$diagnosis, predictor = train$PredictionsPerc)
+      
+      trainAUC[N] = rocANS$auc
+    
+      #------------------------------------
+      ## Testing the test data
+      
+      # Predict
+      test$logit = predict(model, test)
+      
+      # calculate probabilities
+      test$PredictionsPerc = lapply(test$logit, logit2prob)
+      # If the percentage is above 0.5 we predict schizophrenia
+      test$predictions[test$PredictionsPerc > 0.5] = "schizophrenia"
+      # If the percentage is under 0.5 we predict control
+      test$predictions[test$PredictionsPerc < 0.5] = "control"
+      # Confusion matrix
+      confMatTest = confusionMatrix(data = test$predictions, reference = test$diagnosis, positive = "schizophrenia")
+    
+      testAccuracy[N] = confMatTest$overall[1]
+      testSensitivity[N] = confMatTest$byClass[1]
+      testSpecificity[N] = confMatTest$byClass[2]
+      testPPV[N] = confMatTest$byClass[3]
+      testNPV[N] = confMatTest$byClass[4]
+      
+      
+      test$PredictionsPerc = as.numeric(test$PredictionsPerc)
+    
+      # Calculate area under the curve
+      rocANStest = roc(response = test$diagnosis, predictor = test$PredictionsPerc)
+      
+      testAUC[N] = rocANStest$auc
+      
+      
+      
+      N = N+1
+    }
+   
+    crossValTrainResults = data.frame(trainAccuracy, trainSensitivity, trainSpecificity, trainPPV, trainNPV, trainAUC)
+    crossValTestResults = data.frame(testAccuracy, testSensitivity, testSpecificity, testPPV, testNPV, testAUC)
+  
+  
+    # Take the means for overall performance
+    trainResults = unlist(lapply(crossValTrainResults, mean))
+    testResults = unlist(lapply(crossValTestResults, mean))
+ 
+    
+    if (n == 1){
+      dfResultsMultiple = data.frame(trainResults, testResults)
+      # Rename colnames
+      colnames = c(str_c("train_", modelName[n]), str_c("test_", modelName[n]))
+    
+      colnames(dfResultsMultiple) = colnames
+      n = n+1
+  }
+    else{
+    dfResultsMultiple = data.frame(dfResultsMultiple, trainResults, testResults)
+    
+    colnames = c(colnames, str_c("train_", modelName[n]), str_c("test_", modelName[n]))
+    
+    colnames(dfResultsMultiple) = colnames
+    n = n+1
+  }
+print(modelName[n])
+}
+
+
+row.names(dfResultsMultiple) = c("accuracy", "sensitivity", "specificity", "PPV", "NPV", "AUC")
+
+```
+
+
+### Question 4: Properly report the results
+
+METHODS SECTION: how did you analyse the data? That is, how did you extract the data, designed the models and compared their performance?
+
+RESULTS SECTION: can you diagnose schizophrenia based on voice? which features are used? Comment on the difference between the different performance measures.
+
+### Bonus question 5
+
+You have some additional bonus data involving speech rate, pauses, etc. Include them in your analysis. Do they improve classification?
+
+### Bonus question 6
+
+Logistic regression is only one of many classification algorithms. Try using others and compare performance. Some examples: Discriminant Function, Random Forest, Support Vector Machine, etc. The package caret provides them.
