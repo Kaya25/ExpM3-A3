@@ -1,0 +1,356 @@
+---
+title: "A3-P1_p"
+author: "Karolina Sramova"
+date: "26 októbra 2017"
+output: html_document
+---
+
+```{r}
+# Load libraries
+library(lmtest)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(dplyr)
+library(MuMIn)
+library(car)
+library(plyr)
+library(stringr)
+library(tidyverse)
+library(Metrics)
+library(modelr)
+library(caret)
+library(cvTools)
+library(simr)
+library(MASS)
+library(pastecs)
+library(crqa)
+library(nonlinearTseries)
+library(pROC)
+library(Scale)
+```
+
+## Assignment 2 - Part 1 - Assessing voice in schizophrenia
+
+Schizophrenia has been associated with "inappropriate" voice, sometimes monotone, sometimes croaky. A few studies indicate that pitch might be an index of schizophrenia. However, an ongoing meta-analysis of the literature (which you will have a go at in the last assignment) indicates that pitch mean and standard deviation are only weak indicators of diagnosis. Can we do better with our new fancy complex skills?
+
+The corpus you are asked to analyse is a set of voice recordings from people with schizophrenia (just after first diagnosis) and 1-1 matched controls (on gender, age, education). Each participant watched 10 videos of triangles moving across the screen and had to describe them (so you have circa 10 recordings per person). I have already extracted the pitch once every 10 milliseconds and you will have to use this data to assess differences in the voice.
+
+N.B. Question to be answered via email to Celine: can you characterize voice in schizophrenia as acoustically different? Report the methods you used to answer this question and the results from the analyses. Add a couple of lines trying to interpret the results (make sense of the difference). E.g. People with schizophrenia tend to have high-pitched voice, and present bigger swings in their prosody than controls. Add a couple of lines describing limitations of the data/analyses if any is relevant.
+
+N.B. There are looots of files to be dealt with. Probably too many for your computer. This is a challenge for you. Some (complementary) possible strategies: You can select a subset of files only (and you have to justify your choice). You can learn how to use the apply() or map() functions. You can coordinate with classmates.
+
+1. In the course of this assignment you have to first select one datafile and figure out how to:
+
+- Extract "standard" descriptors of pitch: Mean, standard deviation, range
+- Extract less "standard" descriptors of pitch you can think of (e.g. median, iqr, mean absoluted deviation, coefficient of variation)
+- Extract "complex" descriptors: recurrence quantification analysis
+
+
+
+```{r}
+# Set WD and read data
+setwd("C:/Users/Karolina/Desktop/AU/Experimental Methods III/Assignments/ExpM3-A3")
+d_demo = read.table("DemoData.txt", header=TRUE)
+
+setwd("C:/Users/Karolina/Desktop/AU/Experimental Methods III/Assignments/ExpM3-A3")
+d_articulation = read.csv("Articulation.txt")
+
+
+#Read first file
+d1 = read.table("Pitch/Study1D0S105T1_f0.txt", header = T)
+
+
+# Extract standard descriptors
+  # Control is 0
+mean1 = mean(d1$f0)
+std1 = sd(d1$f0)
+range1 = range(d1$f0)
+range1[2]-range1[1]
+
+# Extract less standard descriptors
+median1 = median(d1$f0)
+iqr1 = IQR(d1$f0)
+mad1 = mean(abs(d1$f0-mean(d1$f0)))
+cov1 = sd(d1$f0) / mean(d1$f0)
+
+# Extract complex descriptors
+
+# Get optimal parameters
+par = list(lgM =  50, steps = seq(1, 6, 1),  radiusspan = 100,  radiussample = 40, normalize = 0,  rescale = 0,  mindiagline = 2,  minvertline = 2,  tw = 0,  whiteline = FALSE,  recpt = FALSE,  fnnpercent = 10,  typeami = "mindip")
+ans = optimizeParam(d1, d1, par, min.rec= 3.5, max.rec= 4.5)
+
+# Run CRQA analysis
+crqa1=crqa (d1, d1, delay=ans$delay, embed=ans$emddim, radius=ans$radius, normalize=0, rescale=0, mindiagline = 2, minvertline = 2) 
+crqa1
+```
+
+2. Second you will have to turn the code into a function and loop through all the files (or even better use apply/sapply/lapply)
+- Remember to extract the relevant information from the file names (Participant, Diagnosis, Trial, Study)
+```{r}
+### PREPERATION
+
+# Get a list of all the files
+Files = list.files("Pitch/", ".txt")
+# Get a smaller list for experimentation
+Files_t = sample(Files, 5)
+
+
+
+### DETERMINING THE OPTIMAL PARAMETERS
+
+# Make lists for values
+Delay = NULL
+Embed = NULL
+Radius = NULL
+# Iteration count
+n = 1
+# Define input to parameter optimization
+par = list(lgM =  50, steps = seq(1, 6, 1),  radiusspan = 100,  radiussample = 40, normalize = 0,  rescale = 0,  mindiagline = 2,  minvertline = 2,  tw = 0,  whiteline = FALSE,  recpt = FALSE,  fnnpercent = 10,  typeami = "mindip")
+
+  # NOTE: Normal, most conservative settings for parameter optimization used
+
+# Optimize for each file
+for (i in Files){
+  # Put the path together with the filename
+  dest = paste("Pitch/", i, sep="")
+  # Read it
+  d_t <- read.table(dest, header = T)
+  
+  # Get optimized parameters
+  ans = try(optimizeParam(d_t, d_t, par, min.rec= 3.5, max.rec= 4.5))
+  
+  if (length(ans) < 2){
+    Delay[n] = NA
+    Embed[n] = NA
+    Radius[n] = NA
+  } else {
+    Delay[n] = ans$delay
+    Embed[n] = ans$emddim
+    Radius[n] = ans$radius}
+  
+  # Loop end
+  print (n)
+  n = n+1 
+  }
+
+DELAY = median(Delay, na.rm = T)
+EMBED = median(Embed, na.rm = T)
+RADIUS = median(Radius, na.rm = T)
+
+```
+
+```{r}
+### DATA GENERATION
+
+# Create lists for values
+Subject = NULL
+Diagnosis = NULL
+Study = NULL
+Trial = NULL
+
+# Descriptive statistics
+P_Mean = NULL
+P_SD = NULL
+P_Range = NULL
+P_Median = NULL
+P_IQR = NULL
+P_MeanAbDif = NULL
+P_CovofVar = NULL
+
+# CRQA
+P_RR = NULL
+P_DET = NULL
+P_NRLINE = NULL
+P_maxL = NULL
+P_L = NULL
+P_ENTR = NULL
+P_LAM = NULL
+P_TT = NULL
+
+# Iteration counter
+n = 1
+
+# Read file
+for (i in Files){
+  # Put the path together with the filename
+  dest = paste("Pitch/", i, sep="")
+  # Read it
+  d_t <- read.table(dest, header = T)
+  
+  # Extract from filename
+  Subject[n] = str_extract(i, "S+\\d+") %>%   
+      str_extract("\\d+")
+  Study[n] = str_extract(i, "Study+\\d+") %>%   
+      str_extract("\\d+")
+  Diagnosis[n] = str_extract(i, "D+\\d+") %>%   
+      str_extract("\\d+")
+  Trial[n] = str_extract(i, "T+\\d+") %>%   
+      str_extract("\\d+")
+  
+  # Extract descriptive statistics
+  P_Mean[n] = mean(d_t$f0)
+  P_SD[n] = sd(d_t$f0)
+  P_Range[n] = range(d_t$f0)[2] - range(d_t$f0)[1]
+  P_Median[n] = median(d_t$f0)
+  P_IQR[n] = IQR(d_t$f0)
+  P_MeanAbDif[n] = mean(abs(d_t$f0-mean(d_t$f0)))
+  P_CovofVar[n] = sd(d_t$f0) / mean(d_t$f0)
+  
+  # CRQA analysis
+  crqa_t = try(crqa (d_t, d_t, delay=DELAY, embed=EMBED, radius=RADIUS, normalize=0, rescale=0, mindiagline = 2, minvertline = 2)) 
+  
+  
+  if (is.na(Delay[n]) | length(crqa_t) < 2 ){
+    P_RR[n] = NA
+    P_DET[n] = NA
+    P_NRLINE[n] = NA
+    P_maxL[n] = NA
+    P_L[n] = NA
+    P_ENTR[n] = NA
+    P_LAM[n] = NA
+    P_TT[n] = NA
+  } else {
+    P_RR[n] = crqa_t$RR
+    P_DET[n] = crqa_t$DET
+    P_NRLINE[n] = crqa_t$NRLINE
+    P_maxL[n] = crqa_t$maxL
+    P_L[n] = crqa_t$L
+    P_ENTR[n] = crqa_t$ENTR
+    P_LAM[n] = crqa_t$LAM
+    P_TT[n] = crqa_t$TT}
+  
+  # Loop end
+  print(n)
+  n = n+1}
+
+
+### Create the dataset
+
+# Bind lists together
+d_out = cbind(Subject, Study, Diagnosis, Trial, P_Mean, P_SD, P_Range, P_Median, P_IQR, P_MeanAbDif, P_CovofVar, P_RR, P_DET, P_NRLINE, P_maxL, P_L, P_ENTR, P_LAM, P_TT)
+
+# Make into dataframe
+d_out = as.data.frame(d_out)
+
+# Rename diagnosis
+library(plyr)
+d_out$Diagnosis = revalue(d_out$Diagnosis, c("0" = "Control", "1" = "Schizophrenia"))
+
+# Make all numbers into numeric
+d_out[4:19] <- lapply(d_out[4:19], as.character) %>%
+  lapply(as.numeric)
+
+
+### Combine with demographics data
+
+# Make Subject into factor
+d_demo$Subject = as.factor(d_demo$Subject)
+
+# And merge 
+d_full = merge(d_out, d_demo)
+
+
+# Write the datafile to csv
+write.csv (d_full, file = "Pitch_Out_Data.csv")
+
+```
+
+
+3. Make one model per acoustic feature and test whether you can observe significant difference due to Diagnosis. Tip: Which other fixed factors should you control for (that is, include in the model)? Which random ones?
+- Bonus points: cross-validate the model and report the betas and standard errors from all rounds to get an idea of how robust the estimates are. 
+3a. Is study a significant predictor in these models? What should you infer from this? Does study interact with diagnosis? What should you infer from this?
+
+```{r}
+# Read the file (using Celine's emergency file)
+d = read.csv("final_rqa.csv")
+```
+
+```{r}
+# Make models for acoustic features
+
+# Pitch mean
+PitchMean = lmer(mean ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchMean)
+
+# Pitch SD
+PitchSD = lmer(stdDev ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchSD)
+
+# Pitch range
+PitchRange = lmer(range ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchRange)
+
+# Pitch median
+PitchMedian = lmer(median ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchMedian)
+
+# IQR - interquartile range, a measure of variability, shows where middle 50% of the data is
+PitchIQR = lmer(InterquartileRange ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchIQR)
+
+# Mean Absolute Deviation - the average distance between each data value and the mean
+PitchMAD = lmer(MeanAbsoluteDeviation ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchMAD)
+
+# Coefficient of variation - the ratio of the standard deviation to the mean (average)
+PitchCOV = lmer(coefficientOfVariation ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchCOV)
+
+# Delay
+PitchDelay = lmer(delay ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchDelay)
+
+# Radius
+PitchRadius = lmer(radius ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchRadius)
+
+# Embed
+PitchEmbed = lmer(embed ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchEmbed)
+
+# RR or rqa_REC - recurrence rate; high rr- lots of similar values in the timeseries, low rr - the timeseries contains many different values
+PitchRR = lmer(rqa_REC ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchRR)
+
+# DET - determinism; High DET: when the system recurs, it tends to do that for at least two states in phase space. Low DET: when the system recurs, it tends to do that for only 1 state
+PitchDET = lmer(rqa_DET ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchDET)
+
+# rqa_maxL - max diagonal line length; High MaxL: highly stable system: the system can repeat a very long sequence without being perturbed; Low MaxL: highly unstable system: the system tends to be perturbed 
+PitchMaxL = lmer(rqa_maxL ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchMaxL)
+
+# rqa_ENTR - entropy; High Entropy: the system recurs in many different ways: sometimes short sequences, sometimes long sequences. Low Entropy: the system recurs in stereotyped ways: always the same length
+PitchEntr = lmer(rqa_ENTR ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchEntr)
+
+# rqa_TT -trapping time; High TT: when recurring a state the system tends to be trapped into it, repeating it again and again for long periods; Low TT: the system tends not to repeat the same state
+PitchTT = lmer(rqa_TT ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchTT)
+
+# rqa_LAM - laminarity; High LAM: sequences tend to be composed of the same state repeated over and over; Low LAM: sequences if present (cf. DET) tend to be composed of different states
+PitchLAM = lmer(rqa_LAM ~ diagnosis + diagnosis*study + (1|participant), d)
+summary(PitchLAM)
+
+```
+
+
+
+
+
+
+4. Bonus Question: Compare effect size of diagnosis across the different measures. Which measure seems most sensitive?
+- Tip: to compare across measures you need to put all of them on the same scale, that is, you need to "standardize" them (z-score)
+
+5. Bonus question. In the Clinical Info file you have additional information about the participants. Which additional parameters (e.g. age, gender) should we control for? Report the effects.
+
+6. Write a paragraph reporting methods and results
+
+[Next assignment: can we use these measures to build a tool that diagnoses people from voice only?]
+
+## N.B. Remember to save the acoustic features of voice in a separate file, so to be able to load them next time
+
+
+
+
